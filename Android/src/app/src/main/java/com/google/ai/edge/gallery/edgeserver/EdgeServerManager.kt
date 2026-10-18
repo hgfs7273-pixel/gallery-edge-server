@@ -57,6 +57,13 @@ object EdgeServerManager {
   /** Callback invoked by the server when it needs a model. Set by NavGraph. */
   @Volatile var modelFinderCallback: (() -> Unit)? = null
 
+  // Remember the most recently bound model so that a server created *after*
+  // binding (the normal flow: model loads at app start, server toggled later)
+  // still picks it up.
+  @Volatile private var lastModel: Model? = null
+  @Volatile private var lastHelper: LlmModelHelper? = null
+  @Volatile private var lastDisplayName: String = ""
+
   private var service: EdgeServerService? = null
   private var bound = false
 
@@ -64,6 +71,7 @@ object EdgeServerManager {
     override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
       service = (binder as EdgeServerService.LocalBinder).getService()
       bound = true
+      lastModel?.let { m -> lastHelper?.let { h -> service?.setActiveModel(m, h, lastDisplayName) } }
       refreshState()
       Log.i(TAG, "Service connected")
     }
@@ -79,7 +87,12 @@ object EdgeServerManager {
   /** Start the Edge Server on [host]:[port] with a foreground service. */
   fun startServer(context: Context, host: String = EdgeServer.DEFAULT_HOST, port: Int = EdgeServer.DEFAULT_PORT) {
     if (server == null || !server!!.isAlive) {
-      server = EdgeServer(hostname = host, port = port).also { it.modelFinder = modelFinderCallback }
+      server = EdgeServer(hostname = host, port = port).also {
+        it.modelFinder = modelFinderCallback
+        it.activeModel = lastModel
+        it.activeModelHelper = lastHelper
+        it.activeModelDisplayName = lastDisplayName
+      }
       try {
         server?.start()
         Log.i(TAG, "Server started on $host:$port")
@@ -117,6 +130,9 @@ object EdgeServerManager {
 
   /** Bind a loaded model so the server can serve inference requests. */
   fun bindModel(model: Model, helper: LlmModelHelper, displayName: String) {
+    lastModel = model
+    lastHelper = helper
+    lastDisplayName = displayName
     server?.activeModel = model
     server?.activeModelHelper = helper
     server?.activeModelDisplayName = displayName
@@ -127,6 +143,9 @@ object EdgeServerManager {
 
   /** Unbind the current model. */
   fun unbindModel() {
+    lastModel = null
+    lastHelper = null
+    lastDisplayName = ""
     server?.activeModel = null
     server?.activeModelHelper = null
     server?.activeModelDisplayName = ""
