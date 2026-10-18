@@ -50,6 +50,13 @@ import kotlinx.coroutines.CoroutineScope
 
 private const val TAG = "AGLlmChatModelHelper"
 
+// Edge Server: raise the engine's context window floor so that long prompts
+// (e.g. an on-device agent's ~20k-token system prompt) fit. The model's own
+// default may be as low as 4000 tokens, which the HTTP server otherwise
+// rejects with "Input token ids are too long". Matches the max context
+// advertised by multimodal LiteRT-LM models (32k) and their 12GB+ requirement.
+private const val MIN_CONTEXT_TOKENS = 32000
+
 data class LlmModelInstance(val engine: Engine, var conversation: Conversation)
 
 object LlmChatModelHelper : LlmModelHelper {
@@ -70,7 +77,10 @@ object LlmChatModelHelper : LlmModelHelper {
   ) {
     // Prepare options.
     val maxTokens =
-      model.getIntConfigValue(key = ConfigKeys.MAX_TOKENS, defaultValue = DEFAULT_MAX_TOKEN)
+      maxOf(
+        model.getIntConfigValue(key = ConfigKeys.MAX_TOKENS, defaultValue = DEFAULT_MAX_TOKEN),
+        MIN_CONTEXT_TOKENS,
+      )
     val topK = model.getIntConfigValue(key = ConfigKeys.TOPK, defaultValue = DEFAULT_TOPK)
     val topP = model.getFloatConfigValue(key = ConfigKeys.TOPP, defaultValue = DEFAULT_TOPP)
     val temperature =
