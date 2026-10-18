@@ -50,11 +50,32 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  signingConfigs {
+    // Stable sideload signing key, provided via environment in CI so that
+    // successive builds share the same signature (updates install over the
+    // previous build without uninstalling).
+    val ksPath = System.getenv("KEYSTORE_PATH")
+    if (!ksPath.isNullOrBlank()) {
+      create("releaseStable") {
+        storeFile = file(ksPath)
+        storePassword = System.getenv("KEYSTORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS")
+        keyPassword = System.getenv("KEY_PASSWORD")
+        storeType = "pkcs12"
+      }
+    }
+  }
+
   buildTypes {
     release {
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("debug")
+      signingConfig =
+        if (System.getenv("KEYSTORE_PATH").isNullOrBlank()) {
+          signingConfigs.getByName("debug")
+        } else {
+          signingConfigs.getByName("releaseStable")
+        }
     }
   }
   compileOptions {
