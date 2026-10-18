@@ -55,7 +55,7 @@ private const val TAG = "AGLlmChatModelHelper"
 // default may be as low as 4000 tokens, which the HTTP server otherwise
 // rejects with "Input token ids are too long". Matches the max context
 // advertised by multimodal LiteRT-LM models (32k) and their 12GB+ requirement.
-private const val MIN_CONTEXT_TOKENS = 32000
+private const val MIN_CONTEXT_TOKENS = 16384
 
 data class LlmModelInstance(val engine: Engine, var conversation: Conversation)
 
