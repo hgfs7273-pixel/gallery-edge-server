@@ -139,15 +139,14 @@ class EdgeServer(
   // ───────────────────────────────────────────────────────────────────────
 
   private fun handleChatCompletions(session: IHTTPSession): Response {
-    // NanoHTTPD requires parseBody() before reading POST data.
-    val bodyFiles = HashMap<String, String>()
-    try {
-      session.parseBody(bodyFiles)
+    // Read the request body as UTF-8. NanoHTTPD's parseBody() falls back to
+    // US-ASCII when the client omits a charset, which corrupts non-ASCII
+    // (e.g. Chinese) text, so read the body ourselves when possible.
+    val bodyStr = try {
+      readRequestBodyUtf8(session)
     } catch (e: Exception) {
       return errorResponse(400, "Failed to parse request body: ${e.message}")
     }
-
-    val bodyStr = bodyFiles["postData"] ?: ""
     if (bodyStr.isEmpty()) {
       return errorResponse(400, "Empty request body")
     }
@@ -343,6 +342,29 @@ class EdgeServer(
   // ───────────────────────────────────────────────────────────────────────
   // Helpers
   // ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Reads the request body and decodes it as UTF-8 regardless of whether the
+   * client sent a `charset` in the Content-Type header. Falls back to
+   * NanoHTTPD's [IHTTPSession.parseBody] for chunked / unknown-length bodies.
+   */
+  private fun readRequestBodyUtf8(session: IHTTPSession): String {
+    val len = session.headers["content-length"]?.trim()?.toIntOrNull() ?: -1
+    if (len in 0..(16 * 1024 * 1024)) {
+      val buf = ByteArray(len)
+      var off = 0
+      val input = session.inputStream
+      while (off < len) {
+        val r = input.read(buf, off, len - off)
+        if (r < 0) break
+        off += r
+      }
+      return String(buf, 0, off, Charsets.UTF_8)
+    }
+    val files = HashMap<String, String>()
+    session.parseBody(files)
+    return files["postData"] ?: ""
+  }
 
   private fun tryAutoDiscoverModel() {
     val finder = modelFinder ?: return
