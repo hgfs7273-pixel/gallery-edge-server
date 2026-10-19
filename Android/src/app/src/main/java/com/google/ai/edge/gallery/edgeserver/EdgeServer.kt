@@ -50,6 +50,7 @@ class EdgeServer(
   hostname: String = DEFAULT_HOST,
   port: Int = DEFAULT_PORT,
   private val timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
+  private val logFile: java.io.File? = null,
 ) : NanoHTTPD(hostname, port) {
 
   companion object {
@@ -78,6 +79,20 @@ class EdgeServer(
   private val inferenceLock = ReentrantLock()
   private val gson = Gson()
 
+  /**
+   * Appends a diagnostic line to [logFile] (and Logcat). The file survives a
+   * process crash, which lets us find out where an oversized request died.
+   */
+  private fun dbg(message: String) {
+    Log.i(TAG, message)
+    val file = logFile ?: return
+    try {
+      if (file.length() > 512 * 1024) file.delete()
+      file.appendText("${System.currentTimeMillis()} $message\n")
+    } catch (_: Exception) {
+    }
+  }
+
   // ───────────────────────────────────────────────────────────────────────
   // Request routing
   // ───────────────────────────────────────────────────────────────────────
@@ -96,6 +111,7 @@ class EdgeServer(
         uri == "/health" -> handleHealth()
         uri == "/v1/models" && method == Method.GET -> handleListModels()
         uri == "/v1/chat/completions" && method == Method.POST -> handleChatCompletions(session)
+        uri == "/debug/log" -> handleDebugLog()
         method == Method.OPTIONS -> newFixedLengthResponse(
           Response.Status.OK, MIME_PLAINTEXT, ""
         ).applyCors()
@@ -140,10 +156,28 @@ class EdgeServer(
   }
 
   // ───────────────────────────────────────────────────────────────────────
+  // GET /debug/log
+  // ───────────────────────────────────────────────────────────────────────
+
+  private fun handleDebugLog(): Response {
+    val text = try {
+      logFile?.takeIf { it.exists() }?.readText() ?: "(no log)"
+    } catch (e: Exception) {
+      "(failed to read log: ${e.message})"
+    }
+    return newFixedLengthResponse(
+      Response.Status.OK,
+      "text/plain; charset=utf-8",
+      text.takeLast(200_000),
+    ).applyCors()
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
   // POST /v1/chat/completions
   // ───────────────────────────────────────────────────────────────────────
 
   private fun handleChatCompletions(session: IHTTPSession): Response {
+    dbg("chat: begin content-length=${session.headers["content-length"]}")
     // Read the request body as UTF-8. NanoHTTPD's parseBody() falls back to
     // US-ASCII when the client omits a charset, which corrupts non-ASCII
     // (e.g. Chinese) text, so read the body ourselves when possible.
@@ -152,6 +186,7 @@ class EdgeServer(
     } catch (e: Exception) {
       return errorResponse(400, "Failed to parse request body: ${e.message}")
     }
+    dbg("chat: body read chars=${bodyStr.length}")
     if (bodyStr.isEmpty()) {
       return errorResponse(400, "Empty request body")
     }
@@ -163,6 +198,7 @@ class EdgeServer(
     } catch (e: Exception) {
       return errorResponse(400, "Invalid JSON: ${e.message}")
     }
+    dbg("chat: json parsed")
 
     val model = activeModel
     val helper = activeModelHelper
@@ -179,6 +215,7 @@ class EdgeServer(
     }
 
     val prompt = buildPromptFitting(messages)
+    dbg("chat: prompt chars=${prompt.length}")
 
     val stream = body.get("stream")?.asBoolean ?: false
     val requestId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
@@ -299,17 +336,35 @@ class EdgeServer(
     return (ascii / 4) + nonAscii + 1
   }
 
+  /**
+   * Keeps the beginning and the end of an oversized message, dropping the
+   * middle. The end is favoured because user instructions and questions often
+   * sit at the tail (e.g. a pasted document followed by "summarize this").
+   */
   private fun truncateToTokens(s: String, maxTokens: Int): String {
     if (estimateTokens(s) <= maxTokens) return s
-    val sb = StringBuilder()
-    var ascii = 0
-    var nonAscii = 0
-    for (ch in s) {
-      if (ch.code < 128) ascii++ else nonAscii++
-      if ((ascii / 4) + nonAscii > maxTokens) break
-      sb.append(ch)
+    val headTokens = (maxTokens * 2) / 5
+    val tailTokens = maxTokens - headTokens
+    val chars = s.toCharArray()
+
+    fun takeFrom(start: Int, forward: Boolean, budget: Int): String {
+      val sb = StringBuilder()
+      var ascii = 0
+      var nonAscii = 0
+      var i = start
+      while (i in chars.indices) {
+        val ch = chars[i]
+        if (ch.code < 128) ascii++ else nonAscii++
+        if ((ascii / 4) + nonAscii > budget) break
+        sb.append(ch)
+        i += if (forward) 1 else -1
+      }
+      return if (forward) sb.toString() else sb.reverse().toString()
     }
-    return sb.append("\n[...truncated...]").toString()
+
+    val head = takeFrom(0, true, headTokens)
+    val tail = takeFrom(chars.size - 1, false, tailTokens)
+    return "$head\n[...truncated...]\n$tail"
   }
 
   /** Extracts text from an OpenAI `content` field (String | Array | Object | null). */
@@ -410,6 +465,7 @@ class EdgeServer(
     if (!inferenceLock.tryLock(5, TimeUnit.SECONDS)) {
       return errorResponse(429, "Server busy. Try again later.")
     }
+    dbg("inference: begin promptChars=${prompt.length}")
     try {
       val result = StringBuilder()
       val latch = CountDownLatch(1)
@@ -424,6 +480,7 @@ class EdgeServer(
         cleanUpListener = { latch.countDown() },
         onError = { msg -> errorMsg = msg; latch.countDown() },
       )
+      dbg("inference: returned, waiting")
 
       if (!latch.await(timeoutSeconds, TimeUnit.SECONDS)) {
         return errorResponse(504, "Inference timed out after ${timeoutSeconds}s")
