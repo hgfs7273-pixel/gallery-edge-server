@@ -87,7 +87,11 @@ object EdgeServerManager {
   /** Start the Edge Server on [host]:[port] with a foreground service. */
   fun startServer(context: Context, host: String = EdgeServer.DEFAULT_HOST, port: Int = EdgeServer.DEFAULT_PORT) {
     if (server == null || !server!!.isAlive) {
-      server = EdgeServer(hostname = host, port = port).also {
+      server = EdgeServer(
+        hostname = host,
+        port = port,
+        logFile = java.io.File(context.filesDir, "edge-server.log"),
+      ).also {
         it.modelFinder = modelFinderCallback
         it.activeModel = lastModel
         it.activeModelHelper = lastHelper
