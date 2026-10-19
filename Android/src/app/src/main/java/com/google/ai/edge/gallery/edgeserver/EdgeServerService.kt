@@ -60,7 +60,11 @@ class EdgeServerService : Service() {
     startForeground(NOTIFICATION_ID, buildNotification(host, port))
 
     if (server == null || !server!!.isAlive) {
-      server = EdgeServer(hostname = host, port = port)
+      server = EdgeServer(
+        hostname = host,
+        port = port,
+        logFile = java.io.File(filesDir, "edge-server.log"),
+      )
       try {
         server?.start()
         Log.i(TAG, "Edge Server started on $host:$port")
