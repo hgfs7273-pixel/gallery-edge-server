@@ -172,6 +172,19 @@ class EdgeServer(
     ).applyCors()
   }
 
+  /**
+   * Clears the engine-side conversation so history cannot accumulate across
+   * requests. Best-effort: failures are logged and ignored.
+   */
+  private fun resetConversation(model: Model, helper: LlmModelHelper) {
+    try {
+      helper.resetConversation(model = model)
+      dbg("conversation: reset ok")
+    } catch (e: Exception) {
+      dbg("conversation: reset failed: ${e.message}")
+    }
+  }
+
   // ───────────────────────────────────────────────────────────────────────
   // POST /v1/chat/completions
   // ───────────────────────────────────────────────────────────────────────
@@ -404,6 +417,11 @@ class EdgeServer(
     val pipedIn = PipedInputStream(pipedOut, 64 * 1024)
     val done = AtomicBoolean(false)
 
+    dbg("inference(stream): begin promptChars=${prompt.length}")
+    // Engine conversations persist across calls; reset so history cannot grow
+    // without bound (clients resend history on every request).
+    resetConversation(model, helper)
+
     Thread {
       try {
         val latch = CountDownLatch(1)
@@ -466,6 +484,10 @@ class EdgeServer(
       return errorResponse(429, "Server busy. Try again later.")
     }
     dbg("inference: begin promptChars=${prompt.length}")
+    // The underlying engine keeps conversation history across calls, which
+    // would grow without bound and eventually stall/crash the model. The
+    // OpenAI API is stateless (clients resend history), so start fresh.
+    resetConversation(model, helper)
     try {
       val result = StringBuilder()
       val latch = CountDownLatch(1)
