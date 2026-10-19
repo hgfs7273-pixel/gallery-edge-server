@@ -58,10 +58,10 @@ class EdgeServer(
     const val DEFAULT_TIMEOUT_SECONDS = 300L
     private const val MIME_JSON = "application/json"
 
-    // Conservative ceiling for request prompt size (estimated tokens). Chosen to
-    // stay below the engine's context floor with headroom for generation, so
-    // oversized requests fail cleanly instead of OOM-crashing the app.
-    private const val MAX_INPUT_TOKENS_EST = 8000
+    // Conservative ceiling for the request prompt (estimated tokens). Measured
+    // on-device: ~20k chars OK, ~30k chars crashed the engine, so stay well
+    // below that and leave headroom for generation.
+    private const val MAX_INPUT_TOKENS_EST = 5000
   }
 
   /** The active model, set via [EdgeServerManager.bindModel]. */
@@ -170,23 +170,15 @@ class EdgeServer(
       return errorResponse(503, "No model loaded. Open the Gallery app and load a model first.")
     }
 
+    // Guard against prompts so large that the native engine aborts/OOMs the
+    // whole app. Instead of rejecting outright, keep the system message and
+    // the newest turns, dropping the oldest history until it fits.
     val messages = body.getAsJsonArray("messages")
     if (messages == null || messages.size() == 0) {
       return errorResponse(400, "\"messages\" array is required and must not be empty")
     }
 
-    val prompt = buildPrompt(messages)
-
-    // Guard against prompts so large that the native engine aborts/OOMs the
-    // whole app. Estimate tokens from UTF-8 byte length (conservative) and
-    // reject early with a clean error instead of crashing.
-    val estimatedTokens = prompt.toByteArray(Charsets.UTF_8).size / 4
-    if (estimatedTokens > MAX_INPUT_TOKENS_EST) {
-      return errorResponse(
-        400,
-        "Prompt too large: ~$estimatedTokens tokens (estimated); this device supports about $MAX_INPUT_TOKENS_EST. Trim your client's system prompt / tool definitions / history.",
-      )
-    }
+    val prompt = buildPromptFitting(messages)
 
     val stream = body.get("stream")?.asBoolean ?: false
     val requestId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
@@ -221,6 +213,103 @@ class EdgeServer(
       }
     }
     append("<start_of_turn>model\n")
+  }
+
+  /**
+   * Builds the prompt while keeping it within [MAX_INPUT_TOKENS_EST].
+   *
+   * Keeps the leading system message (if any) and the most recent turns, and
+   * drops older history from the middle until the estimated size fits. The
+   * newest user turn is always preserved, even if it alone is oversized, in
+   * which case it is truncated with a marker.
+   */
+  private fun buildPromptFitting(messages: com.google.gson.JsonArray): String {
+    val entries = messages.mapNotNull { el ->
+      val obj = el.asJsonObject
+      val role = obj.get("role")?.asString ?: "user"
+      val content = extractContent(obj.get("content"))
+      if (content.isEmpty()) null else role to content
+    }
+    if (entries.isEmpty()) return buildPrompt(messages)
+
+    val systemRaw = entries.firstOrNull { it.first == "system" }
+    val rest = if (systemRaw != null) entries.drop(1) else entries
+    val overhead = estimateTokens("<start_of_turn>system\n<end_of_turn>\n")
+
+    // A client may send a system prompt larger than the whole budget (agents
+    // often do). Truncate it so it cannot alone overflow the engine.
+    val system = systemRaw?.let { (role, content) ->
+      val maxSystem = (MAX_INPUT_TOKENS_EST * 2) / 3
+      role to truncateToTokens(content, maxSystem)
+    }
+
+    val kept = ArrayDeque<Pair<String, String>>()
+    var total = if (system != null) estimateTokens(system.second) + overhead else 0
+    // Walk backwards so the newest turns win.
+    for (entry in rest.asReversed()) {
+      val cost = estimateTokens(entry.second) + overhead
+      if (total + cost > MAX_INPUT_TOKENS_EST) break
+      kept.addFirst(entry)
+      total += cost
+    }
+
+    // If nothing fit, truncate the newest turn so the request still works.
+    if (kept.isEmpty() && rest.isNotEmpty()) {
+      val newest = rest.last()
+      val systemCost = if (system != null) estimateTokens(system.second) + overhead else 0
+      // If the system message leaves no room, drop it rather than fail.
+      val effectiveSystem = if (MAX_INPUT_TOKENS_EST - systemCost < 128) null else system
+      val allowance = (MAX_INPUT_TOKENS_EST -
+        (if (effectiveSystem != null) estimateTokens(effectiveSystem.second) + overhead else 0))
+        .coerceAtLeast(128)
+      val finalList = buildList {
+        if (effectiveSystem != null) add(effectiveSystem)
+        add(newest.first to truncateToTokens(newest.second, allowance))
+      }
+      return buildString {
+        for ((role, content) in finalList) {
+          append("<start_of_turn>$role\n$content<end_of_turn>\n")
+        }
+        append("<start_of_turn>model\n")
+      }
+    }
+
+    val finalList = buildList {
+      if (system != null) add(system)
+      addAll(kept)
+    }
+    return buildString {
+      for ((role, content) in finalList) {
+        append("<start_of_turn>$role\n$content<end_of_turn>\n")
+      }
+      append("<start_of_turn>model\n")
+    }
+  }
+
+  /**
+   * Rough token estimate: ASCII runs average ~4 chars/token, while CJK and
+   * other non-ASCII characters are close to 1 token each.
+   */
+  private fun estimateTokens(s: String): Int {
+    var ascii = 0
+    var nonAscii = 0
+    for (ch in s) {
+      if (ch.code < 128) ascii++ else nonAscii++
+    }
+    return (ascii / 4) + nonAscii + 1
+  }
+
+  private fun truncateToTokens(s: String, maxTokens: Int): String {
+    if (estimateTokens(s) <= maxTokens) return s
+    val sb = StringBuilder()
+    var ascii = 0
+    var nonAscii = 0
+    for (ch in s) {
+      if (ch.code < 128) ascii++ else nonAscii++
+      if ((ascii / 4) + nonAscii > maxTokens) break
+      sb.append(ch)
+    }
+    return sb.append("\n[...truncated...]").toString()
   }
 
   /** Extracts text from an OpenAI `content` field (String | Array | Object | null). */
