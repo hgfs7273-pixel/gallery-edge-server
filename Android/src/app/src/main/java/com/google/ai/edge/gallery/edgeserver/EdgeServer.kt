@@ -30,7 +30,7 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.Semaphore
 
 private const val TAG = "EdgeServer"
 
@@ -76,7 +76,7 @@ class EdgeServer(
    */
   @Volatile var modelFinder: (() -> Unit)? = null
 
-  private val inferenceLock = ReentrantLock()
+  private val inferenceLock = Semaphore(1)
   private val gson = Gson()
 
   /**
@@ -178,6 +178,9 @@ class EdgeServer(
    */
   private fun resetConversation(model: Model, helper: LlmModelHelper) {
     try {
+      // Make sure no previous generation is still touching the conversation
+      // before closing it, otherwise the native engine can crash.
+      try { helper.stopResponse(model) } catch (_: Exception) {}
       helper.resetConversation(model = model)
       dbg("conversation: reset ok")
     } catch (e: Exception) {
@@ -409,7 +412,7 @@ class EdgeServer(
     model: Model, helper: LlmModelHelper, prompt: String,
     requestId: String, modelId: String,
   ): Response {
-    if (!inferenceLock.tryLock(5, TimeUnit.SECONDS)) {
+    if (!inferenceLock.tryAcquire(5, TimeUnit.SECONDS)) {
       return errorResponse(429, "Server busy. Try again later.")
     }
 
@@ -462,7 +465,7 @@ class EdgeServer(
         Log.e(TAG, "Inference error", e)
       } finally {
         try { pipedOut.close() } catch (_: Exception) {}
-        inferenceLock.unlock()
+        inferenceLock.release()
       }
     }.start()
 
@@ -480,7 +483,7 @@ class EdgeServer(
     model: Model, helper: LlmModelHelper, prompt: String,
     requestId: String, modelId: String,
   ): Response {
-    if (!inferenceLock.tryLock(5, TimeUnit.SECONDS)) {
+    if (!inferenceLock.tryAcquire(5, TimeUnit.SECONDS)) {
       return errorResponse(429, "Server busy. Try again later.")
     }
     dbg("inference: begin promptChars=${prompt.length}")
@@ -520,7 +523,7 @@ class EdgeServer(
       }
       return newFixedLengthResponse(Response.Status.OK, MIME_JSON, json).applyCors()
     } finally {
-      inferenceLock.unlock()
+      inferenceLock.release()
     }
   }
 
