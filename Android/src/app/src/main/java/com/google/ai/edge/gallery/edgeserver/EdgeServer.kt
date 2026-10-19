@@ -57,6 +57,11 @@ class EdgeServer(
     const val DEFAULT_PORT = 8888
     const val DEFAULT_TIMEOUT_SECONDS = 300L
     private const val MIME_JSON = "application/json"
+
+    // Conservative ceiling for request prompt size (estimated tokens). Chosen to
+    // stay below the engine's 16k context floor with headroom for generation,
+    // so oversized requests fail cleanly instead of OOM-crashing the app.
+    private const val MAX_INPUT_TOKENS_EST = 12000
   }
 
   /** The active model, set via [EdgeServerManager.bindModel]. */
@@ -171,6 +176,18 @@ class EdgeServer(
     }
 
     val prompt = buildPrompt(messages)
+
+    // Guard against prompts so large that the native engine aborts/OOMs the
+    // whole app. Estimate tokens from UTF-8 byte length (conservative) and
+    // reject early with a clean error instead of crashing.
+    val estimatedTokens = prompt.toByteArray(Charsets.UTF_8).size / 4
+    if (estimatedTokens > MAX_INPUT_TOKENS_EST) {
+      return errorResponse(
+        400,
+        "Prompt too large: ~$estimatedTokens tokens (estimated); this device supports about $MAX_INPUT_TOKENS_EST. Trim your client's system prompt / tool definitions / history.",
+      )
+    }
+
     val stream = body.get("stream")?.asBoolean ?: false
     val requestId = "chatcmpl-${UUID.randomUUID().toString().take(12)}"
     val modelId = activeModelDisplayName.ifEmpty { model.name }
