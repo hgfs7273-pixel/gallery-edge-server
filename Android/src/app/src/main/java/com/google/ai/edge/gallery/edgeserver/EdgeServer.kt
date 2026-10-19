@@ -59,9 +59,9 @@ class EdgeServer(
     private const val MIME_JSON = "application/json"
 
     // Conservative ceiling for request prompt size (estimated tokens). Chosen to
-    // stay below the engine's 16k context floor with headroom for generation,
-    // so oversized requests fail cleanly instead of OOM-crashing the app.
-    private const val MAX_INPUT_TOKENS_EST = 12000
+    // stay below the engine's context floor with headroom for generation, so
+    // oversized requests fail cleanly instead of OOM-crashing the app.
+    private const val MAX_INPUT_TOKENS_EST = 8000
   }
 
   /** The active model, set via [EdgeServerManager.bindModel]. */
